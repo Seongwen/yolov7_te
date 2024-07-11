@@ -17,6 +17,7 @@ from utils.general import non_max_suppression, make_divisible, scale_coords, inc
 from utils.plots import color_list, plot_one_box
 from utils.torch_utils import time_synchronized
 
+from models.SE import SEAttention  ## add se
 
 ##### basic ####
 
@@ -60,7 +61,15 @@ class Concat(nn.Module):
 
     def forward(self, x):
         return torch.cat(x, self.d)
+## add se
+class Concat_ATT(nn.Module):
+    def __init__(self, channel, dimension=1):
+        super(Concat_ATT, self).__init__()
+        self.d = dimension
+        self.att = SEAttention(channel)
 
+    def forward(self, x):
+        return self.att(torch.cat(x, self.d))
 
 class Chuncat(nn.Module):
     def __init__(self, dimension=1):
@@ -109,6 +118,20 @@ class Conv(nn.Module):
 
     def fuseforward(self, x):
         return self.act(self.conv(x))
+# add se
+class Conv_ATT(nn.Module):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):  # ch_in, ch_out, kernel, stride, padding, groups
+        super(Conv_ATT, self).__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p), groups=g, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
+        self.att = SEAttention(c2)
+
+    def forward(self, x):
+        return self.att(self.act(self.bn(self.conv(x))))
+
+    def fuseforward(self, x):
+        return self.att(self.act(self.conv(x)))
     
 
 class RobustConv(nn.Module):
@@ -278,6 +301,27 @@ class SPPCSPC(nn.Module):
         y1 = self.cv6(self.cv5(torch.cat([x1] + [m(x1) for m in self.m], 1)))
         y2 = self.cv2(x)
         return self.cv7(torch.cat((y1, y2), dim=1))
+    # add se
+class SPPCSPC_ATT(nn.Module):
+    # CSP https://github.com/WongKinYiu/CrossStagePartialNetworks
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, k=(5, 9, 13)):
+        super(SPPCSPC_ATT, self).__init__()
+        c_ = int(2 * c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(c_, c_, 3, 1)
+        self.cv4 = Conv(c_, c_, 1, 1)
+        self.m = nn.ModuleList([nn.MaxPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
+        self.cv5 = Conv(4 * c_, c_, 1, 1)
+        self.cv6 = Conv(c_, c_, 3, 1)
+        self.cv7 = Conv(2 * c_, c2, 1, 1)
+        self.att = SEAttention(c2)
+
+    def forward(self, x):
+        x1 = self.cv4(self.cv3(self.cv1(x)))
+        y1 = self.cv6(self.cv5(torch.cat([x1] + [m(x1) for m in self.m], 1)))
+        y2 = self.cv2(x)
+        return self.att(self.cv7(torch.cat((y1, y2), dim=1)))
 
 class GhostSPPCSPC(SPPCSPC):
     # CSP https://github.com/WongKinYiu/CrossStagePartialNetworks
